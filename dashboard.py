@@ -109,7 +109,7 @@ MAPA_KATEGORII = {
     "inne": "📦 Inne modyfikacje",
 }
 
-# NOWOCZESNA STYLIZACJA KAFELKÓW
+# STYLIZACJA CSS DLA KLIKALNYCH KAFELKÓW
 st.markdown(
     """
 <style>
@@ -117,8 +117,9 @@ st.markdown(
         background: linear-gradient(145deg, #1e222d, #161922);
         border: 1px solid #2d3343;
         border-radius: 12px;
-        padding: 12px;
+        padding: 14px;
         margin-bottom: 14px;
+        min-height: 180px;
         display: flex;
         flex-direction: column;
         justify-content: space-between;
@@ -128,44 +129,45 @@ st.markdown(
         border-color: #58a6ff;
         transform: translateY(-2px);
     }
-    .mod-img-wrapper {
-        width: 100%;
-        height: 130px;
-        border-radius: 8px;
-        overflow: hidden;
-        background: #11141a;
+    .mod-top-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
         margin-bottom: 8px;
     }
-    .mod-img-wrapper img {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
+    .mod-icon {
+        font-size: 1.8rem;
     }
-    .mod-title-text {
+    .mod-title-link {
         font-weight: 700;
-        font-size: 0.98rem;
-        color: #ffffff;
-        margin-bottom: 3px;
+        font-size: 1.05rem;
+        color: #58a6ff !important;
+        text-decoration: none;
         line-height: 1.3;
         height: 2.6em;
         overflow: hidden;
         display: -webkit-box;
         -webkit-line-clamp: 2;
         -webkit-box-orient: vertical;
+        margin-bottom: 4px;
+    }
+    .mod-title-link:hover {
+        color: #79c0ff !important;
+        text-decoration: underline;
     }
     .mod-author-text {
-        font-size: 0.82rem;
+        font-size: 0.84rem;
         color: #8b949e;
-        margin-bottom: 8px;
+        margin-bottom: 10px;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
     }
     .badge-pill {
         display: inline-block;
-        padding: 3px 7px;
-        border-radius: 5px;
-        font-size: 0.75rem;
+        padding: 3px 8px;
+        border-radius: 6px;
+        font-size: 0.76rem;
         font-weight: 600;
         margin-right: 4px;
     }
@@ -235,7 +237,6 @@ def load_data():
         "size_raw": "0 MB",
         "rating": 0.0,
         "votes": 0,
-        "image_url": "",
         "download_url": "",
         "filename": "",
         "url": "",
@@ -342,7 +343,7 @@ def pobierz_plik_moda(row, folder_docelowy, on_chunk=None):
         return False, str(e)
 
 
-# FUNKCJA PARSUJĄCA DLA PANELU ADMINA
+# FUNKCJA DLA PANELU ADMINA
 def parsuj_pojedynczy_mod_online(url):
     dane = {
         "url": url,
@@ -360,7 +361,6 @@ def parsuj_pojedynczy_mod_online(url):
         "votes": 0,
         "version": "1.0.0.0",
         "release_date": "",
-        "image_url": "",
         "download_url": "",
         "filename": "",
     }
@@ -371,24 +371,6 @@ def parsuj_pojedynczy_mod_online(url):
             h2 = soup.find("h2")
             if h2:
                 dane["title"] = h2.get_text(strip=True)
-
-            for img in soup.find_all("img", src=True):
-                src = img["src"]
-                if any(
-                    b in src.lower()
-                    for b in ["flag", "logo", "icon", "lang", "social"]
-                ):
-                    continue
-                if (
-                    "modhub" in src.lower()
-                    or "mods" in src.lower()
-                    or "imgs" in src.lower()
-                    or "storage" in src.lower()
-                ):
-                    dane["image_url"] = urljoin(BASE_URL, src).replace(
-                        "http://", "https://"
-                    )
-                    break
 
             for a in soup.find_all("a", href=True):
                 if (
@@ -493,7 +475,7 @@ st.markdown("---")
 )
 
 # ==========================================
-# ZAKŁADKA 1: WIZUALNY MODHUB ZE ZDJĘCIAMI (PROXIED)
+# ZAKŁADKA 1: WIZUALNY MODHUB (KLIKALNE LINKI DO MODHUBA)
 # ==========================================
 with tab_modhub:
     basket_count = len(st.session_state["basket"])
@@ -611,22 +593,26 @@ with tab_modhub:
                     mod_id = mod["mod_id"]
                     is_in_basket = mod_id in st.session_state["basket"]
 
-                    # Ustalenie linku do zdjęcia
-                    raw_img = mod.get("image_url", "")
-                    if not raw_img or "flag" in str(raw_img).lower():
-                        raw_img = f"https://www.farming-simulator.com/img/mods/imgs/512x288/mod_{mod_id}.jpg"
+                    icon = (
+                        mod["category"].split()[0]
+                        if " " in mod["category"]
+                        else "🚜"
+                    )
 
-                    # UŻYCIE BEZPIECZNEGO PROXY OMIJAJĄCEGO BŁĄD 403
-                    proxied_img_url = f"https://wsrv.nl/?url={raw_img}&w=380&output=webp"
-
+                    # KAFELEK Z KLIKALNYM TYTUŁEM OTWIERAJĄCYM MODHUB ZE ZDJĘCIAMI
                     st.markdown(
                         f"""
                         <div class="mod-card-box">
                             <div>
-                                <div class="mod-img-wrapper">
-                                    <img src="{proxied_img_url}" loading="lazy" onerror="this.parentElement.style.display='none';" />
+                                <div class="mod-top-row">
+                                    <span class="mod-icon">{icon}</span>
+                                    <a href="{mod['url']}" target="_blank" style="text-decoration: none; font-size: 0.78rem; color: #58a6ff; background: #21262d; padding: 2px 7px; border-radius: 4px; border: 1px solid #30363d;">
+                                        ID: {mod_id} ↗
+                                    </a>
                                 </div>
-                                <div class="mod-title-text" title="{mod['title']}">{mod['title']}</div>
+                                <a href="{mod['url']}" target="_blank" class="mod-title-link" title="Kliknij, aby otworzyć zdjęcia na ModHubie">
+                                    {mod['title']}
+                                </a>
                                 <div class="mod-author-text">👤 {mod['author']}</div>
                             </div>
                             <div>
@@ -717,7 +703,9 @@ with tab_koszyk:
         for mod_id, mod_item in list(st.session_state["basket"].items()):
             row_c1, row_c2, row_c3, row_c4 = st.columns([5, 3, 2, 1.5])
             with row_c1:
-                st.markdown(f"**{mod_item.get('title', 'Mod')}**")
+                st.markdown(
+                    f"**[{mod_item.get('title', 'Mod')}]({mod_item.get('url', '#')})**"
+                )
                 st.caption(f"Autor: {mod_item.get('author', 'Nieznany')}")
             with row_c2:
                 st.markdown(f"📁 {mod_item.get('category', 'Inne')}")
