@@ -4,7 +4,7 @@ import math
 import os
 import re
 import time
-from urllib.parse import urljoin
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 from bs4 import BeautifulSoup
 import pandas as pd
 import plotly.express as px
@@ -18,15 +18,21 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# HASŁO DO PANELU ADMINISTRATORA (możesz je tutaj zmienić)
+ADMIN_PASSWORD = "admin123"
+
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept-Language": "pl-PL,pl;q=0.9,en-US;q=0.8",
 }
 BASE_URL = "https://www.farming-simulator.com/"
+START_URL_PL = "https://www.farming-simulator.com/mods.php?lang=pl&country=pl&title=fs2025&filter=latest&page="
+JSON_FILE = "mody_fs25.json"
 DOMYSLNA_SCIEZKA_MODS = os.path.expanduser(
     r"~\Documents\My Games\FarmingSimulator2025\mods"
 )
 
-# KOMPLEKSOWY SŁOWNIK TŁUMACZEŃ KATEGORII
+# SŁOWNIK TŁUMACZEŃ KATEGORII
 MAPA_KATEGORII = {
     "small tractors": "🚜 Ciągniki (małe)",
     "medium tractors": "🚜 Ciągniki (średnie)",
@@ -109,7 +115,7 @@ st.markdown(
         background: linear-gradient(145deg, #1e222d, #171a23);
         border: 1px solid #2d3343;
         border-radius: 12px;
-        padding: 14px;
+        padding: 12px;
         margin-bottom: 15px;
         transition: transform 0.2s, border-color 0.2s;
     }
@@ -117,19 +123,9 @@ st.markdown(
         border-color: #4a90e2;
         transform: translateY(-2px);
     }
-    .basket-row-box {
-        background: #1e212b;
-        border: 1px solid #30363d;
-        border-radius: 8px;
-        padding: 10px 15px;
-        margin-bottom: 8px;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-    }
     .mod-title-text {
         font-weight: bold;
-        font-size: 1.05rem;
+        font-size: 1.0rem;
         color: #ffffff;
         margin-top: 8px;
         margin-bottom: 4px;
@@ -141,7 +137,7 @@ st.markdown(
         -webkit-box-orient: vertical;
     }
     .mod-author-text {
-        font-size: 0.85rem;
+        font-size: 0.82rem;
         color: #8b949e;
         margin-bottom: 8px;
         white-space: nowrap;
@@ -150,9 +146,9 @@ st.markdown(
     }
     .badge-pill {
         display: inline-block;
-        padding: 3px 8px;
+        padding: 3px 7px;
         border-radius: 5px;
-        font-size: 0.78rem;
+        font-size: 0.75rem;
         font-weight: 600;
         margin-right: 4px;
     }
@@ -188,8 +184,41 @@ def tlumacz_kategorie(tekst):
     return MAPA_KATEGORII.get(t, f"📦 {str(tekst).title() if tekst else 'Inne'}")
 
 
+def bezpieczny_url_zdjecia(url):
+    """Wymusza HTTPS i eliminuje flagi."""
+    if not url or not isinstance(url, str):
+        return ""
+    u = url.strip()
+    if u.startswith("http://"):
+        u = u.replace("http://", "https://", 1)
+    if "flag" in u.lower() or "lang" in u.lower():
+        return ""
+    return u
+
+
+def size_to_mb(size_str):
+    match = re.search(r"([\d.,]+)\s*(KB|MB|GB|TB)", size_str, re.IGNORECASE)
+    if not match:
+        return 0.0
+    val = float(match.group(1).replace(",", "."))
+    unit = match.group(2).upper()
+    if unit == "KB":
+        return val / 1024
+    elif unit == "MB":
+        return val
+    elif unit == "GB":
+        return val * 1024
+    elif unit == "TB":
+        return val * 1024 * 1024
+    return 0.0
+
+
+@st.cache_data
 def load_data():
-    with open("mody_fs25.json", "r", encoding="utf-8") as f:
+    if not os.path.exists(JSON_FILE):
+        return pd.DataFrame()
+
+    with open(JSON_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
     df = pd.DataFrame(data)
 
@@ -215,6 +244,7 @@ def load_data():
 
     df["author"] = df["author"].astype(str).str.strip()
     df["category"] = df["category"].apply(tlumacz_kategorie)
+    df["image_url"] = df["image_url"].apply(bezpieczny_url_zdjecia)
 
     df["size_mb"] = pd.to_numeric(df["size_mb"], errors="coerce").fillna(0.0)
     df["rating"] = pd.to_numeric(df["rating"], errors="coerce").fillna(0.0)
@@ -243,8 +273,6 @@ if "selected_category" not in st.session_state:
     st.session_state["selected_category"] = None
 if "selected_page_num" not in st.session_state:
     st.session_state["selected_page_num"] = 1
-if "stop_download" not in st.session_state:
-    st.session_state["stop_download"] = False
 
 
 def pobierz_plik_moda(row, folder_docelowy, on_chunk=None):
@@ -310,7 +338,106 @@ def pobierz_plik_moda(row, folder_docelowy, on_chunk=None):
         return False, str(e)
 
 
-# NAGŁÓWEK
+# --- FUNKCJE DLA PANELU ADMINISTRATORA ---
+def parsuj_pojedynczy_mod_online(url):
+    dane = {
+        "url": url,
+        "mod_id": (
+            re.search(r"mod_id=(\d+)", url).group(1)
+            if "mod_id=" in url
+            else ""
+        ),
+        "title": "Nieznany",
+        "author": "Nieznany",
+        "category": "Inne",
+        "size_raw": "0 MB",
+        "size_mb": 0.0,
+        "rating": 0.0,
+        "votes": 0,
+        "version": "1.0.0.0",
+        "release_date": "",
+        "image_url": "",
+        "download_url": "",
+        "filename": "",
+    }
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=12)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            h2 = soup.find("h2")
+            if h2:
+                dane["title"] = h2.get_text(strip=True)
+
+            # Zdjęcie (HTTPS i bez flag)
+            for img in soup.find_all("img", src=True):
+                src = img["src"]
+                if any(
+                    b in src.lower()
+                    for b in ["flag", "logo", "icon", "lang", "social"]
+                ):
+                    continue
+                if (
+                    "modhub" in src.lower()
+                    or "mods" in src.lower()
+                    or "imgs" in src.lower()
+                    or "storage" in src.lower()
+                ):
+                    full_src = urljoin(BASE_URL, src).replace(
+                        "http://", "https://"
+                    )
+                    dane["image_url"] = full_src
+                    break
+
+            for a in soup.find_all("a", href=True):
+                if (
+                    ".zip" in a["href"].lower()
+                    or "downloadFile.php" in a["href"]
+                ):
+                    dane["download_url"] = urljoin(BASE_URL, a["href"])
+                    break
+
+            text_full = soup.get_text(separator="\n")
+            lines = [
+                line.strip() for line in text_full.split("\n") if line.strip()
+            ]
+            for i, line in enumerate(lines):
+                l = line.rstrip(":.").lower()
+                if l in ["autor", "author"] and i + 1 < len(lines):
+                    dane["author"] = lines[i + 1]
+                elif l in ["kategoria", "category"] and i + 1 < len(lines):
+                    dane["category"] = lines[i + 1]
+                elif l in ["rozmiar", "size"] and i + 1 < len(lines):
+                    dane["size_raw"] = lines[i + 1]
+                    dane["size_mb"] = size_to_mb(lines[i + 1])
+                elif l in ["wersja", "version"] and i + 1 < len(lines):
+                    dane["version"] = lines[i + 1]
+                elif l in ["data wydania", "released"] and i + 1 < len(lines):
+                    dane["release_date"] = lines[i + 1]
+
+            match_rating = re.search(
+                r"(?:Ocena użytkowników|User Rating)[\s.:]+([\d.,]+)\s*\(([\d\s.,]+)\)",
+                text_full,
+                re.IGNORECASE,
+            )
+            if match_rating:
+                dane["rating"] = float(match_rating.group(1).replace(",", "."))
+                dane["votes"] = int(
+                    re.sub(r"[^\d]", "", match_rating.group(2))
+                )
+
+            fn_match = re.search(
+                r"(?:Nazwa pliku|Filename)[\s.:]+([a-zA-Z0-9_\-\.]+\.zip)",
+                text_full,
+                re.IGNORECASE,
+            )
+            if fn_match:
+                dane["filename"] = fn_match.group(1).strip()
+    except Exception:
+        pass
+    return dane
+
+
+# NAGŁÓWEK GŁÓWNY
 st.title("🚜 Farming Simulator 25 – ModHub Visual Manager")
 st.caption(
     "Centrum analityki, automatyczny menedżer paczek i wizualny eksplorator ModHuba"
@@ -320,18 +447,25 @@ st.markdown("---")
 # METRYKI
 c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("📦 Wszystkich modów", f"{len(df):,}")
-c2.metric("💾 Całkowita waga", f"{df['size_mb'].sum() / 1024:.2f} GB")
+c2.metric(
+    "💾 Całkowita waga",
+    f"{df['size_mb'].sum() / 1024:.2f} GB" if not df.empty else "0 GB",
+)
 c3.metric(
     "⭐ Średnia ocen",
-    f"{df[df['rating'] > 0]['rating'].mean():.2f} / 5.0"
-    if len(df[df["rating"] > 0]) > 0
-    else "N/A",
+    (
+        f"{df[df['rating'] > 0]['rating'].mean():.2f} / 5.0"
+        if not df.empty and len(df[df["rating"] > 0]) > 0
+        else "N/A"
+    ),
 )
 c4.metric(
     "🗳️ Oddanych głosów",
-    f"{df['votes'].sum():,}" if "votes" in df else "N/A",
+    f"{df['votes'].sum():,}" if not df.empty and "votes" in df else "N/A",
 )
-c5.metric("👨‍🌾 Liczba autorów", f"{df['author'].nunique():,}")
+c5.metric(
+    "👨‍🌾 Liczba autorów", f"{df['author'].nunique():,}" if not df.empty else "0"
+)
 
 st.markdown("---")
 
@@ -343,6 +477,7 @@ st.markdown("---")
     tab_top,
     tab_giants,
     tab_szukaj,
+    tab_admin,
 ) = st.tabs(
     [
         "🎮 ModHub Visual Hub",
@@ -351,6 +486,7 @@ st.markdown("---")
         "🏆 TOP Rankingi",
         "🕒 Harmonogram GIANTS",
         "🔍 Wyszukiwarka & Tabela",
+        "⚙️ Panel Administratora",
     ]
 )
 
@@ -375,7 +511,7 @@ with tab_modhub:
         else:
             st.info("🛒 Paczka jest pusta")
 
-    kategorie_lista = sorted(df["category"].unique())
+    kategorie_lista = sorted(df["category"].unique()) if not df.empty else []
 
     st.markdown("##### ⚡ Szybki wybór kategorii z listy:")
     wybrana_z_listy = st.selectbox(
@@ -397,10 +533,8 @@ with tab_modhub:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # 1. DUŻE KAFELKI KATEGORII
     if st.session_state["selected_category"] is None:
         st.markdown("### 📁 Lub kliknij w kafelek poniżej:")
-
         cols_per_row = 3
         for i in range(0, len(kategorie_lista), cols_per_row):
             row_cats = kategorie_lista[i : i + cols_per_row]
@@ -408,21 +542,16 @@ with tab_modhub:
             for j, cat in enumerate(row_cats):
                 mod_cnt = len(df[df["category"] == cat])
                 total_c_gb = df[df["category"] == cat]["size_mb"].sum() / 1024
-
                 label = f"**{cat}**\n\n📦 {mod_cnt} modów &nbsp;|&nbsp; 💾 {total_c_gb:.1f} GB"
                 if cols[j].button(
-                    label,
-                    key=f"c_btn_{cat}",
-                    use_container_width=True,
+                    label, key=f"c_btn_{cat}", use_container_width=True
                 ):
                     st.session_state["selected_category"] = cat
                     st.session_state["selected_page_num"] = 1
                     st.rerun()
 
-    # 2. SIATKA MODÓW W KATEGORII
     else:
         current_cat = st.session_state["selected_category"]
-
         col_back, col_cat_title = st.columns([1.2, 4])
         with col_back:
             if st.button(
@@ -436,7 +565,6 @@ with tab_modhub:
             st.markdown(f"### Kategoria: **{current_cat}**")
 
         cat_df = df[df["category"] == current_cat].copy()
-
         search_in_cat = st.text_input(
             f"🔎 Szukaj w {current_cat}:",
             "",
@@ -484,11 +612,7 @@ with tab_modhub:
 
                     st.markdown('<div class="mod-card-box">', unsafe_allow_html=True)
 
-                    if (
-                        img_url
-                        and str(img_url).startswith("http")
-                        and "flag" not in str(img_url).lower()
-                    ):
+                    if img_url and img_url.startswith("https://"):
                         st.image(img_url, use_container_width=True)
                     else:
                         icon = (
@@ -536,7 +660,7 @@ with tab_modhub:
                     st.markdown("<br>", unsafe_allow_html=True)
 
 # ==========================================
-# ZAKŁADKA 2: PACZKA & POBIERANIE (Z USUWANIEM I STOPEM)
+# ZAKŁADKA 2: PACZKA & POBIERANIE
 # ==========================================
 with tab_koszyk:
     st.subheader("🛒 Skomponowana paczka modyfikacji")
@@ -582,7 +706,6 @@ with tab_koszyk:
         )
 
         with m4:
-            # CZYSZCZENIE CAŁOŚCI
             if st.button(
                 "🗑️ Wyczyść cały koszyk", type="secondary", use_container_width=True
             ):
@@ -590,9 +713,7 @@ with tab_koszyk:
                 st.rerun()
 
         st.markdown("---")
-
-        # LISTA MODÓW Z PRZYCISKAMI USUWANIA POJEDYNCZYCH WPISÓW
-        st.markdown("### 📋 Mody w Twojej paczce (możesz usuwać pojedynczo):")
+        st.markdown("### 📋 Mody w Twojej paczce (usuwanie pojedynczo):")
 
         for mod_id, mod_item in list(st.session_state["basket"].items()):
             row_c1, row_c2, row_c3, row_c4 = st.columns([5, 3, 2, 1.5])
@@ -604,7 +725,6 @@ with tab_koszyk:
             with row_c3:
                 st.markdown(f"💾 `{mod_item.get('size_raw', '0 MB')}`")
             with row_c4:
-                # USUWANIE POJEDYNCZEGO MODA
                 if st.button(
                     "❌ Usuń", key=f"del_mod_{mod_id}", use_container_width=True
                 ):
@@ -619,7 +739,8 @@ with tab_koszyk:
         st.markdown("### 🚀 Pobierz paczkę bezpośrednio do gry:")
 
         target_folder = st.text_input(
-            "Folder instalacyjny modów FS25:", value=DOMYSLNA_SCIEZKA_MODS
+            "Folder instalacyjny modów FS25 (przy uruchomieniu lokalnym):",
+            value=DOMYSLNA_SCIEZKA_MODS,
         )
 
         b_col1, b_col2 = st.columns(2)
@@ -658,16 +779,11 @@ with tab_koszyk:
             metric_speed = live_c2.empty()
             metric_eta = live_c3.empty()
 
-            # Kontener na przycisk przerwania
-            stop_container = st.empty()
-
             total_bytes_target = int(total_b_mb * 1024 * 1024)
-
             tracker = {
                 "bytes": 0,
                 "last_update": time.time(),
                 "start_time": time.time(),
-                "aborted": False,
             }
 
             sukces = 0
@@ -676,7 +792,6 @@ with tab_koszyk:
             def on_chunk_downloaded(chunk_len):
                 tracker["bytes"] += chunk_len
                 now = time.time()
-
                 if now - tracker["last_update"] > 0.2:
                     tracker["last_update"] = now
                     elapsed = now - tracker["start_time"]
@@ -721,7 +836,6 @@ with tab_koszyk:
                 status_mod.markdown(
                     f"⏳ **Pobieranie [{idx}/{len(b_df)}]:** `{row['title']}` ({row['size_raw']})"
                 )
-
                 ok, res = pobierz_plik_moda(
                     row, target_folder, on_chunk=on_chunk_downloaded
                 )
@@ -732,8 +846,6 @@ with tab_koszyk:
 
             progress_bar.progress(1.0)
             status_mod.empty()
-            stop_container.empty()
-
             calkowity_czas = time.time() - tracker["start_time"]
             st.success(
                 f"🎉 Pomyślnie pobrano **{sukces} modów** do `{target_folder}` w czasie: **{formatuj_czas(calkowity_czas)}**!"
@@ -748,213 +860,385 @@ with tab_koszyk:
 # ==========================================
 with tab_statystyki:
     st.subheader("📊 Pełne Statystyki i Analityka ModHuba")
+    if not df.empty:
+        st_c1, st_c2 = st.columns(2)
+        with st_c1:
+            st.markdown("#### 💾 Rozkład wagi bazy wg kategorii (GB)")
+            cat_w = (
+                df.groupby("category")["size_mb"]
+                .sum()
+                .reset_index()
+                .sort_values(by="size_mb", ascending=False)
+            )
+            cat_w["size_gb"] = cat_w["size_mb"] / 1024
+            fig_cat_w = px.pie(
+                cat_w.head(12),
+                names="category",
+                values="size_gb",
+                hole=0.4,
+                title="TOP 12 najcięższych kategorii (GB)",
+            )
+            st.plotly_chart(fig_cat_w, use_container_width=True)
 
-    st_c1, st_c2 = st.columns(2)
-    with st_c1:
-        st.markdown("#### 💾 Rozkład wagi bazy wg kategorii (GB)")
-        cat_w = (
-            df.groupby("category")["size_mb"]
-            .sum()
-            .reset_index()
-            .sort_values(by="size_mb", ascending=False)
-        )
-        cat_w["size_gb"] = cat_w["size_mb"] / 1024
-        fig_cat_w = px.pie(
-            cat_w.head(12),
-            names="category",
-            values="size_gb",
-            hole=0.4,
-            title="TOP 12 najcięższych kategorii (GB)",
-        )
-        st.plotly_chart(fig_cat_w, use_container_width=True)
+        with st_c2:
+            st.markdown("#### 📦 Liczba modyfikacji w kategoriach")
+            cat_counts = (
+                df["category"]
+                .value_counts()
+                .reset_index()
+                .rename(columns={"index": "Kategoria", "count": "Liczba modów"})
+            )
+            fig_cat_c = px.bar(
+                cat_counts.head(12),
+                x="category",
+                y="Liczba modów",
+                title="TOP 12 kategorii z największą liczbą modów",
+                color="Liczba modów",
+                color_continuous_scale="Viridis",
+            )
+            st.plotly_chart(fig_cat_c, use_container_width=True)
 
-    with st_c2:
-        st.markdown("#### 📦 Liczba modyfikacji w kategoriach")
-        cat_counts = (
-            df["category"]
-            .value_counts()
-            .reset_index()
-            .rename(columns={"index": "Kategoria", "count": "Liczba modów"})
-        )
-        fig_cat_c = px.bar(
-            cat_counts.head(12),
-            x="category",
-            y="Liczba modów",
-            title="TOP 12 kategorii z największą liczbą modów",
-            color="Liczba modów",
-            color_continuous_scale="Viridis",
-        )
-        st.plotly_chart(fig_cat_c, use_container_width=True)
+        st.markdown("---")
+        st_c3, st_c4 = st.columns(2)
 
-    st.markdown("---")
-    st_c3, st_c4 = st.columns(2)
+        with st_c3:
+            st.markdown("#### 👨‍🌾 TOP 15 Najaktywniejszych Modderów")
+            top_auth = (
+                df[df["author"] != "Nieznany"]["author"]
+                .value_counts()
+                .head(15)
+                .reset_index()
+            )
+            top_auth.columns = ["Autor", "Liczba modów"]
+            fig_auth = px.bar(
+                top_auth,
+                x="Liczba modów",
+                y="Autor",
+                orientation="h",
+                color="Liczba modów",
+                color_continuous_scale="Blues",
+            )
+            fig_auth.update_layout(yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig_auth, use_container_width=True)
 
-    with st_c3:
-        st.markdown("#### 👨‍🌾 TOP 15 Najaktywniejszych Modderów")
-        top_auth = (
-            df[df["author"] != "Nieznany"]["author"]
-            .value_counts()
-            .head(15)
-            .reset_index()
-        )
-        top_auth.columns = ["Autor", "Liczba modów"]
-        fig_auth = px.bar(
-            top_auth,
-            x="Liczba modów",
-            y="Autor",
-            orientation="h",
-            color="Liczba modów",
-            color_continuous_scale="Blues",
-        )
-        fig_auth.update_layout(yaxis=dict(autorange="reversed"))
-        st.plotly_chart(fig_auth, use_container_width=True)
-
-    with st_c4:
-        st.markdown("#### ⚖️ Średnia waga pojedynczego moda (MB)")
-        cat_avg = (
-            df.groupby("category")["size_mb"]
-            .mean()
-            .reset_index()
-            .sort_values(by="size_mb", ascending=False)
-        )
-        fig_avg = px.bar(
-            cat_avg.head(12),
-            x="category",
-            y="size_mb",
-            title="Średnia waga moda w kategorii (MB)",
-            labels={"category": "Kategoria", "size_mb": "Średnia waga (MB)"},
-            color="size_mb",
-            color_continuous_scale="Reds",
-        )
-        st.plotly_chart(fig_avg, use_container_width=True)
+        with st_c4:
+            st.markdown("#### ⚖️ Średnia waga pojedynczego moda (MB)")
+            cat_avg = (
+                df.groupby("category")["size_mb"]
+                .mean()
+                .reset_index()
+                .sort_values(by="size_mb", ascending=False)
+            )
+            fig_avg = px.bar(
+                cat_avg.head(12),
+                x="category",
+                y="size_mb",
+                title="Średnia waga moda w kategorii (MB)",
+                labels={"category": "Kategoria", "size_mb": "Średnia (MB)"},
+                color="size_mb",
+                color_continuous_scale="Reds",
+            )
+            st.plotly_chart(fig_avg, use_container_width=True)
 
 # ==========================================
 # ZAKŁADKA 4: TOP RANKINGI
 # ==========================================
 with tab_top:
-    col_t1, col_t2 = st.columns(2)
-    with col_t1:
-        st.subheader("⭐ TOP 20 Najwyżej Ocenianych (min. 50 ocen)")
-        st.dataframe(
-            df[df["votes"] >= 50]
-            .sort_values(by=["rating", "votes"], ascending=[False, False])
-            .head(20)[
-                ["title", "author", "rating", "votes", "size_raw", "url"]
-            ],
-            column_config={
-                "url": st.column_config.LinkColumn("Link"),
-                "rating": st.column_config.NumberColumn(
-                    "Ocena", format="%.2f ⭐"
-                ),
-            },
-            hide_index=True,
-            use_container_width=True,
-        )
-    with col_t2:
-        st.subheader("🔥 TOP 20 Najpopularniejszych (liczba głosów)")
-        st.dataframe(
-            df.sort_values(by="votes", ascending=False).head(20)[
-                ["title", "author", "votes", "rating", "size_raw", "url"]
-            ],
-            column_config={
-                "url": st.column_config.LinkColumn("Link"),
-                "rating": st.column_config.NumberColumn(
-                    "Ocena", format="%.1f ⭐"
-                ),
-                "votes": st.column_config.NumberColumn(
-                    "Głosy", format="%d 🗳️"
-                ),
-            },
-            hide_index=True,
-            use_container_width=True,
-        )
+    if not df.empty:
+        col_t1, col_t2 = st.columns(2)
+        with col_t1:
+            st.subheader("⭐ TOP 20 Najwyżej Ocenianych (min. 50 ocen)")
+            st.dataframe(
+                df[df["votes"] >= 50]
+                .sort_values(by=["rating", "votes"], ascending=[False, False])
+                .head(20)[
+                    ["title", "author", "rating", "votes", "size_raw", "url"]
+                ],
+                column_config={
+                    "url": st.column_config.LinkColumn("Link"),
+                    "rating": st.column_config.NumberColumn(
+                        "Ocena", format="%.2f ⭐"
+                    ),
+                },
+                hide_index=True,
+                use_container_width=True,
+            )
+        with col_t2:
+            st.subheader("🔥 TOP 20 Najpopularniejszych (liczba głosów)")
+            st.dataframe(
+                df.sort_values(by="votes", ascending=False).head(20)[
+                    ["title", "author", "votes", "rating", "size_raw", "url"]
+                ],
+                column_config={
+                    "url": st.column_config.LinkColumn("Link"),
+                    "rating": st.column_config.NumberColumn(
+                        "Ocena", format="%.1f ⭐"
+                    ),
+                    "votes": st.column_config.NumberColumn(
+                        "Głosy", format="%d 🗳️"
+                    ),
+                },
+                hide_index=True,
+                use_container_width=True,
+            )
 
 # ==========================================
 # ZAKŁADKA 5: DNI TYGODNIA GIANTS
 # ==========================================
 with tab_giants:
     st.subheader("🕒 Kiedy moderatorzy GIANTS publikują mody?")
-    df_d = df.dropna(subset=["date"]).copy()
-    if not df_d.empty:
-        dni = {
-            "Monday": "1. Poniedziałek",
-            "Tuesday": "2. Wtorek",
-            "Wednesday": "3. Środa",
-            "Thursday": "4. Czwartek",
-            "Friday": "5. Piątek",
-            "Saturday": "6. Sobota",
-            "Sunday": "7. Niedziela",
-        }
-        df_d["Dzień"] = df_d["date"].dt.day_name().map(dni)
-        g1, g2 = st.columns(2)
-        with g1:
-            d_cnt = (
-                df_d["Dzień"]
-                .value_counts()
-                .reset_index()
-                .sort_values(by="Dzień")
-            )
-            d_cnt.columns = ["Dzień tygodnia", "Wydanych modów"]
-            st.plotly_chart(
-                px.bar(
-                    d_cnt,
-                    x="Dzień tygodnia",
-                    y="Wydanych modów",
-                    color="Wydanych modów",
-                    color_continuous_scale="Teal",
-                ),
-                use_container_width=True,
-            )
-        with g2:
-            df_d["Miesiąc"] = df_d["date"].dt.to_period("M").astype(str)
-            m_cnt = (
-                df_d["Miesiąc"]
-                .value_counts()
-                .reset_index()
-                .sort_values(by="Miesiąc")
-            )
-            m_cnt.columns = ["Miesiąc", "Liczba"]
-            st.plotly_chart(
-                px.line(m_cnt, x="Miesiąc", y="Liczba", markers=True),
-                use_container_width=True,
-            )
+    if not df.empty:
+        df_d = df.dropna(subset=["date"]).copy()
+        if not df_d.empty:
+            dni = {
+                "Monday": "1. Poniedziałek",
+                "Tuesday": "2. Wtorek",
+                "Wednesday": "3. Środa",
+                "Thursday": "4. Czwartek",
+                "Friday": "5. Piątek",
+                "Saturday": "6. Sobota",
+                "Sunday": "7. Niedziela",
+            }
+            df_d["Dzień"] = df_d["date"].dt.day_name().map(dni)
+            g1, g2 = st.columns(2)
+            with g1:
+                d_cnt = (
+                    df_d["Dzień"]
+                    .value_counts()
+                    .reset_index()
+                    .sort_values(by="Dzień")
+                )
+                d_cnt.columns = ["Dzień tygodnia", "Wydanych modów"]
+                st.plotly_chart(
+                    px.bar(
+                        d_cnt,
+                        x="Dzień tygodnia",
+                        y="Wydanych modów",
+                        color="Wydanych modów",
+                        color_continuous_scale="Teal",
+                    ),
+                    use_container_width=True,
+                )
+            with g2:
+                df_d["Miesiąc"] = df_d["date"].dt.to_period("M").astype(str)
+                m_cnt = (
+                    df_d["Miesiąc"]
+                    .value_counts()
+                    .reset_index()
+                    .sort_values(by="Miesiąc")
+                )
+                m_cnt.columns = ["Miesiąc", "Liczba"]
+                st.plotly_chart(
+                    px.line(m_cnt, x="Miesiąc", y="Liczba", markers=True),
+                    use_container_width=True,
+                )
 
 # ==========================================
 # ZAKŁADKA 6: WYSZUKIWARKA & TABELA
 # ==========================================
 with tab_szukaj:
     st.subheader("🔍 Klasyczna wyszukiwarka i filtry")
-    s_f1, s_f2 = st.columns(2)
-    with s_f1:
-        s_title = st.text_input("Szukaj po nazwie:", key="s_tab_title")
-    with s_f2:
-        s_cat = st.multiselect(
-            "Kategorie:",
-            options=sorted(df["category"].unique()),
-            key="s_tab_cat",
+    if not df.empty:
+        s_f1, s_f2 = st.columns(2)
+        with s_f1:
+            s_title = st.text_input("Szukaj po nazwie:", key="s_tab_title")
+        with s_f2:
+            s_cat = st.multiselect(
+                "Kategorie:",
+                options=sorted(df["category"].unique()),
+                key="s_tab_cat",
+            )
+
+        f_res = df.copy()
+        if s_title:
+            f_res = f_res[
+                f_res["title"].str.contains(s_title, case=False, na=False)
+            ]
+        if s_cat:
+            f_res = f_res[f_res["category"].isin(s_cat)]
+
+        st.dataframe(
+            f_res[
+                [
+                    "title",
+                    "author",
+                    "category",
+                    "size_raw",
+                    "rating",
+                    "votes",
+                    "url",
+                ]
+            ],
+            column_config={"url": st.column_config.LinkColumn("Link")},
+            hide_index=True,
+            use_container_width=True,
         )
 
-    f_res = df.copy()
-    if s_title:
-        f_res = f_res[
-            f_res["title"].str.contains(s_title, case=False, na=False)
-        ]
-    if s_cat:
-        f_res = f_res[f_res["category"].isin(s_cat)]
-
-    st.dataframe(
-        f_res[
-            [
-                "title",
-                "author",
-                "category",
-                "size_raw",
-                "rating",
-                "votes",
-                "url",
-            ]
-        ],
-        column_config={"url": st.column_config.LinkColumn("Link")},
-        hide_index=True,
-        use_container_width=True,
+# ==========================================
+# ZAKŁADKA 7: PANEL ADMINISTRATORA
+# ==========================================
+with tab_admin:
+    st.subheader("⚙️ Panel Zarządzania Bazą ModHub Online")
+    st.write(
+        "Z tego miejsca możesz zaktualizować bazę o nowości lub naprawić zdjęcia bezpośrednio na serwerze."
     )
+
+    haslo_input = st.text_input(
+        "Podaj hasło administratora:", type="password", key="admin_pass_input"
+    )
+
+    if haslo_input == ADMIN_PASSWORD:
+        st.success("🔓 Zalogowano do panelu administratora!")
+
+        adm_c1, adm_c2 = st.columns(2)
+
+        with adm_c1:
+            st.markdown("#### 🔄 1. Szybka aktualizacja bazy (Nowości)")
+            st.caption(
+                "Sprawdza najnowsze strony ModHuba i dopisuje tylko brakujące nowe mody."
+            )
+            if st.button(
+                "🚀 Uruchom aktualizację nowości", type="primary", key="btn_adm_upd"
+            ):
+                with st.spinner("Sprawdzanie nowości na ModHubie..."):
+                    if os.path.exists(JSON_FILE):
+                        with open(JSON_FILE, "r", encoding="utf-8") as f:
+                            istniejace = json.load(f)
+                    else:
+                        istniejace = []
+
+                    znane_id = {
+                        str(m.get("mod_id"))
+                        for m in istniejace
+                        if m.get("mod_id") is not None
+                    }
+                    nowe_linki = []
+                    page = 0
+                    koniec = False
+
+                    while not koniec:
+                        url = f"{START_URL_PL}{page}"
+                        try:
+                            r = requests.get(url, headers=HEADERS, timeout=10)
+                            if r.status_code != 200:
+                                break
+                            soup = BeautifulSoup(r.text, "html.parser")
+                            znalezione = 0
+                            for a in soup.find_all("a", href=True):
+                                if (
+                                    "mod.php?" in a["href"]
+                                    and "mod_id=" in a["href"]
+                                ):
+                                    full_url = urljoin(BASE_URL, a["href"])
+                                    mod_id = re.search(
+                                        r"mod_id=(\d+)", a["href"]
+                                    ).group(1)
+                                    if mod_id in znane_id:
+                                        koniec = True
+                                        break
+                                    if full_url not in nowe_linki:
+                                        nowe_linki.append(full_url)
+                                        znalezione += 1
+                            if znalezione == 0:
+                                break
+                            page += 1
+                        except Exception:
+                            break
+
+                    if not nowe_linki:
+                        st.info("Baza jest w 100% aktualna! Brak nowych modów.")
+                    else:
+                        nowo_pobrane = []
+                        prog_upd = st.progress(0.0)
+                        for i, l in enumerate(nowe_linki, start=1):
+                            nowo_pobrane.append(parsuj_pojedynczy_mod_online(l))
+                            prog_upd.progress(i / len(nowe_linki))
+                            time.sleep(0.1)
+
+                        calosc = nowo_pobrane + istniejace
+                        with open(JSON_FILE, "w", encoding="utf-8") as f:
+                            json.dump(calosc, f, ensure_ascii=False, indent=2)
+
+                        st.success(
+                            f"🎉 Dodano {len(nowo_pobrane)} nowych modów do bazy!"
+                        )
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+
+        with adm_c2:
+            st.markdown("#### 🖼️ 2. Napraw / Wymuś HTTPS dla zdjęć")
+            st.caption(
+                "Przechodzi przez bazę i naprawia brakujące zdjęcia oraz zamienia linki na bezpieczne HTTPS."
+            )
+            if st.button("🔧 Napraw zdjęcia w bazie", key="btn_adm_fix_img"):
+                if os.path.exists(JSON_FILE):
+                    with open(JSON_FILE, "r", encoding="utf-8") as f:
+                        baza_mody = json.load(f)
+
+                    naprawiono = 0
+                    prog_img = st.progress(0.0)
+                    total_b = len(baza_mody)
+
+                    for i, mod in enumerate(baza_mody, start=1):
+                        cur_img = mod.get("image_url", "")
+                        if (
+                            not cur_img
+                            or "flag" in cur_img.lower()
+                            or cur_img.startswith("http://")
+                        ):
+                            try:
+                                r = requests.get(
+                                    mod["url"], headers=HEADERS, timeout=8
+                                )
+                                if r.status_code == 200:
+                                    soup = BeautifulSoup(r.text, "html.parser")
+                                    for img in soup.find_all("img", src=True):
+                                        src = img["src"]
+                                        if any(
+                                            b in src.lower()
+                                            for b in [
+                                                "flag",
+                                                "logo",
+                                                "icon",
+                                                "lang",
+                                            ]
+                                        ):
+                                            continue
+                                        if (
+                                            "modhub" in src.lower()
+                                            or "mods" in src.lower()
+                                            or "imgs" in src.lower()
+                                            or "storage" in src.lower()
+                                        ):
+                                            mod["image_url"] = urljoin(
+                                                BASE_URL, src
+                                            ).replace("http://", "https://")
+                                            naprawiono += 1
+                                            break
+                            except Exception:
+                                pass
+                        if i % 100 == 0 or i == total_b:
+                            prog_img.progress(i / total_b)
+
+                    with open(JSON_FILE, "w", encoding="utf-8") as f:
+                        json.dump(baza_mody, f, ensure_ascii=False, indent=2)
+
+                    st.success(f"🎉 Zaktualizowano zdjęcia dla {naprawiono} modów!")
+                    st.cache_data.clear()
+                    time.sleep(1)
+                    st.rerun()
+
+        st.markdown("---")
+        # POBIERANIE JSON NA DYSK
+        if os.path.exists(JSON_FILE):
+            with open(JSON_FILE, "r", encoding="utf-8") as f:
+                json_str = f.read()
+            st.download_button(
+                "💾 Pobierz aktualny plik `mody_fs25.json` na swój komputer",
+                data=json_str,
+                file_name="mody_fs25.json",
+                mime="application/json",
+            )
+    elif haslo_input:
+        st.error("❌ Nieprawidłowe hasło administratora.")
