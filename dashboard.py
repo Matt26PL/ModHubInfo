@@ -4,7 +4,7 @@ import math
 import os
 import re
 import time
-from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 import pandas as pd
 import plotly.express as px
@@ -18,8 +18,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# HASŁO DO PANELU ADMINISTRATORA (możesz je tutaj zmienić)
-ADMIN_PASSWORD = "admin123"
+# HASŁO ADMINISTRATORA (Domyślne lub pobierane bezpiecznie ze Streamlit Secrets)
+try:
+    ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "admin123")
+except Exception:
+    ADMIN_PASSWORD = "admin123"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -125,9 +128,9 @@ st.markdown(
     }
     .mod-title-text {
         font-weight: bold;
-        font-size: 1.0rem;
+        font-size: 0.98rem;
         color: #ffffff;
-        margin-top: 8px;
+        margin-top: 6px;
         margin-bottom: 4px;
         line-height: 1.3;
         height: 2.6em;
@@ -185,7 +188,6 @@ def tlumacz_kategorie(tekst):
 
 
 def bezpieczny_url_zdjecia(url):
-    """Wymusza HTTPS i eliminuje flagi."""
     if not url or not isinstance(url, str):
         return ""
     u = url.strip()
@@ -338,7 +340,7 @@ def pobierz_plik_moda(row, folder_docelowy, on_chunk=None):
         return False, str(e)
 
 
-# --- FUNKCJE DLA PANELU ADMINISTRATORA ---
+# FUNKCJE DLA PANELU ADMINISTRATORA
 def parsuj_pojedynczy_mod_online(url):
     dane = {
         "url": url,
@@ -368,7 +370,6 @@ def parsuj_pojedynczy_mod_online(url):
             if h2:
                 dane["title"] = h2.get_text(strip=True)
 
-            # Zdjęcie (HTTPS i bez flag)
             for img in soup.find_all("img", src=True):
                 src = img["src"]
                 if any(
@@ -612,8 +613,20 @@ with tab_modhub:
 
                     st.markdown('<div class="mod-card-box">', unsafe_allow_html=True)
 
-                    if img_url and img_url.startswith("https://"):
-                        st.image(img_url, use_container_width=True)
+                    # WYŚWIETLANIE ZDJĘCIA Z NO-REFERRER (ODBLOKOWUJE CDN GIANTS)
+                    if (
+                        img_url
+                        and isinstance(img_url, str)
+                        and img_url.startswith("https://")
+                    ):
+                        st.markdown(
+                            f"""
+                            <div style="width: 100%; height: 135px; overflow: hidden; border-radius: 8px; margin-bottom: 6px; background: #111;">
+                                <img src="{img_url}" referrerpolicy="no-referrer" loading="lazy" style="width: 100%; height: 100%; object-fit: cover;" onerror="this.style.display='none'" />
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
                     else:
                         icon = (
                             mod["category"].split()[0]
@@ -1167,9 +1180,9 @@ with tab_admin:
                         st.rerun()
 
         with adm_c2:
-            st.markdown("#### 🖼️ 2. Napraw / Wymuś HTTPS dla zdjęć")
+            st.markdown("#### 🖼️ 2. Napraw zdjęcia w bazie (Pobierz linki)")
             st.caption(
-                "Przechodzi przez bazę i naprawia brakujące zdjęcia oraz zamienia linki na bezpieczne HTTPS."
+                "Przechodzi przez bazę, pobiera prawdziwe miniaturki i zamienia linki na bezpieczne HTTPS."
             )
             if st.button("🔧 Napraw zdjęcia w bazie", key="btn_adm_fix_img"):
                 if os.path.exists(JSON_FILE):
@@ -1230,7 +1243,6 @@ with tab_admin:
                     st.rerun()
 
         st.markdown("---")
-        # POBIERANIE JSON NA DYSK
         if os.path.exists(JSON_FILE):
             with open(JSON_FILE, "r", encoding="utf-8") as f:
                 json_str = f.read()
