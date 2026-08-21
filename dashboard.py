@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import json
 import math
@@ -18,6 +19,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# HASŁO ADMINISTRATORA (Domyślne lub z Secrets)
 try:
     ADMIN_PASSWORD = st.secrets.get("ADMIN_PASSWORD", "admin123")
 except Exception:
@@ -339,6 +341,146 @@ def pobierz_plik_moda(row, folder_docelowy, on_chunk=None):
         return False, str(e)
 
 
+# FUNKCJE DLA PANELU ADMINISTRATORA
+def parsuj_pojedynczy_mod_online(url):
+    dane = {
+        "url": url,
+        "mod_id": (
+            re.search(r"mod_id=(\d+)", url).group(1)
+            if "mod_id=" in url
+            else ""
+        ),
+        "title": "Nieznany",
+        "author": "Nieznany",
+        "category": "Inne",
+        "size_raw": "0 MB",
+        "size_mb": 0.0,
+        "rating": 0.0,
+        "votes": 0,
+        "version": "1.0.0.0",
+        "release_date": "",
+        "image_url": "",
+        "download_url": "",
+        "filename": "",
+    }
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=12)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            h2 = soup.find("h2")
+            if h2:
+                dane["title"] = h2.get_text(strip=True)
+
+            for img in soup.find_all("img", src=True):
+                src = img["src"]
+                if any(
+                    b in src.lower()
+                    for b in ["flag", "logo", "icon", "lang", "social"]
+                ):
+                    continue
+                if (
+                    "modhub" in src.lower()
+                    or "mods" in src.lower()
+                    or "imgs" in src.lower()
+                    or "storage" in src.lower()
+                ):
+                    full_src = urljoin(BASE_URL, src).replace(
+                        "http://", "https://"
+                    )
+                    dane["image_url"] = full_src
+                    break
+
+            for a in soup.find_all("a", href=True):
+                if (
+                    ".zip" in a["href"].lower()
+                    or "downloadFile.php" in a["href"]
+                ):
+                    dane["download_url"] = urljoin(BASE_URL, a["href"])
+                    break
+
+            text_full = soup.get_text(separator="\n")
+            lines = [
+                line.strip() for line in text_full.split("\n") if line.strip()
+            ]
+            for i, line in enumerate(lines):
+                l = line.rstrip(":.").lower()
+                if l in ["autor", "author"] and i + 1 < len(lines):
+                    dane["author"] = lines[i + 1]
+                elif l in ["kategoria", "category"] and i + 1 < len(lines):
+                    dane["category"] = lines[i + 1]
+                elif l in ["rozmiar", "size"] and i + 1 < len(lines):
+                    dane["size_raw"] = lines[i + 1]
+                    dane["size_mb"] = size_to_mb(lines[i + 1])
+                elif l in ["wersja", "version"] and i + 1 < len(lines):
+                    dane["version"] = lines[i + 1]
+                elif l in ["data wydania", "released"] and i + 1 < len(lines):
+                    dane["release_date"] = lines[i + 1]
+
+            match_rating = re.search(
+                r"(?:Ocena użytkowników|User Rating)[\s.:]+([\d.,]+)\s*\(([\d\s.,]+)\)",
+                text_full,
+                re.IGNORECASE,
+            )
+            if match_rating:
+                dane["rating"] = float(match_rating.group(1).replace(",", "."))
+                dane["votes"] = int(
+                    re.sub(r"[^\d]", "", match_rating.group(2))
+                )
+
+            fn_match = re.search(
+                r"(?:Nazwa pliku|Filename)[\s.:]+([a-zA-Z0-9_\-\.]+\.zip)",
+                text_full,
+                re.IGNORECASE,
+            )
+            if fn_match:
+                dane["filename"] = fn_match.group(1).strip()
+    except Exception:
+        pass
+    return dane
+
+
+def pobierz_zdjecia_z_listy_online(page):
+    wyniki = {}
+    url = f"{START_URL_PL}{page}"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=8)
+        if r.status_code == 200:
+            soup = BeautifulSoup(r.text, "html.parser")
+            for item in soup.find_all(
+                ["div", "li"], class_=re.compile(r"mod-item|mod-tile")
+            ):
+                a = item.find("a", href=re.compile(r"mod_id=(\d+)"))
+                img = item.find("img", src=True)
+                if a and img:
+                    m_id = re.search(r"mod_id=(\d+)", a["href"]).group(1)
+                    src = img["src"]
+                    if (
+                        not any(
+                            b in src.lower() for b in ["flag", "logo", "icon"]
+                        )
+                        and "img" in src.lower()
+                    ):
+                        full_img = urljoin(BASE_URL, src).replace(
+                            "http://", "https://"
+                        )
+                        wyniki[str(m_id)] = full_img
+            if not wyniki:
+                for a in soup.find_all("a", href=re.compile(r"mod_id=(\d+)")):
+                    img = a.find("img", src=True)
+                    if img:
+                        m_id = re.search(r"mod_id=(\d+)", a["href"]).group(1)
+                        src = img["src"]
+                        if not any(
+                            b in src.lower() for b in ["flag", "logo", "icon"]
+                        ):
+                            wyniki[str(m_id)] = urljoin(BASE_URL, src).replace(
+                                "http://", "https://"
+                            )
+    except Exception:
+        pass
+    return wyniki
+
+
 # NAGŁÓWEK GŁÓWNY
 st.title("🚜 Farming Simulator 25 – ModHub Visual Manager")
 st.caption(
@@ -371,7 +513,7 @@ c5.metric(
 
 st.markdown("---")
 
-# ZAKŁADKI GŁÓWNE
+# ZAKŁADKI GŁÓWNE (7 ZAKŁADEK W TYM PANEL ADMINA)
 (
     tab_modhub,
     tab_koszyk,
@@ -379,6 +521,7 @@ st.markdown("---")
     tab_top,
     tab_giants,
     tab_szukaj,
+    tab_admin,
 ) = st.tabs(
     [
         "🎮 ModHub Visual Hub",
@@ -387,6 +530,7 @@ st.markdown("---")
         "🏆 TOP Rankingi",
         "🕒 Harmonogram GIANTS",
         "🔍 Wyszukiwarka & Tabela",
+        "⚙️ Panel Administratora",
     ]
 )
 
@@ -512,7 +656,6 @@ with tab_modhub:
 
                     st.markdown('<div class="mod-card-box">', unsafe_allow_html=True)
 
-                    # Miniaturka moda
                     if (
                         img_url
                         and isinstance(img_url, str)
@@ -985,3 +1128,145 @@ with tab_szukaj:
             hide_index=True,
             use_container_width=True,
         )
+
+# ==========================================
+# ZAKŁADKA 7: PANEL ADMINISTRATORA
+# ==========================================
+with tab_admin:
+    st.subheader("⚙️ Panel Zarządzania Bazą ModHub Online")
+    st.write(
+        "Z tego miejsca możesz zaktualizować bazę o nowości lub naprawić zdjęcia bezpośrednio na serwerze."
+    )
+
+    haslo_input = st.text_input(
+        "Podaj hasło administratora:", type="password", key="admin_pass_input"
+    )
+
+    if haslo_input == ADMIN_PASSWORD:
+        st.success("🔓 Zalogowano do panelu administratora!")
+
+        adm_c1, adm_c2 = st.columns(2)
+
+        with adm_c1:
+            st.markdown("#### 🔄 1. Szybka aktualizacja bazy (Nowości)")
+            st.caption(
+                "Sprawdza najnowsze strony ModHuba i dopisuje tylko brakujące nowe mody."
+            )
+            if st.button(
+                "🚀 Uruchom aktualizację nowości", type="primary", key="btn_adm_upd"
+            ):
+                with st.spinner("Sprawdzanie nowości na ModHubie..."):
+                    if os.path.exists(JSON_FILE):
+                        with open(JSON_FILE, "r", encoding="utf-8") as f:
+                            istniejace = json.load(f)
+                    else:
+                        istniejace = []
+
+                    znane_id = {
+                        str(m.get("mod_id"))
+                        for m in istniejace
+                        if m.get("mod_id") is not None
+                    }
+                    nowe_linki = []
+                    page = 0
+                    koniec = False
+
+                    while not koniec:
+                        url = f"{START_URL_PL}{page}"
+                        try:
+                            r = requests.get(url, headers=HEADERS, timeout=10)
+                            if r.status_code != 200:
+                                break
+                            soup = BeautifulSoup(r.text, "html.parser")
+                            znalezione = 0
+                            for a in soup.find_all("a", href=True):
+                                if (
+                                    "mod.php?" in a["href"]
+                                    and "mod_id=" in a["href"]
+                                ):
+                                    full_url = urljoin(BASE_URL, a["href"])
+                                    mod_id = re.search(
+                                        r"mod_id=(\d+)", a["href"]
+                                    ).group(1)
+                                    if mod_id in znane_id:
+                                        koniec = True
+                                        break
+                                    if full_url not in nowe_linki:
+                                        nowe_linki.append(full_url)
+                                        znalezione += 1
+                            if znalezione == 0:
+                                break
+                            page += 1
+                        except Exception:
+                            break
+
+                    if not nowe_linki:
+                        st.info("Baza jest w 100% aktualna! Brak nowych modów.")
+                    else:
+                        nowo_pobrane = []
+                        prog_upd = st.progress(0.0)
+                        for i, l in enumerate(nowe_linki, start=1):
+                            nowo_pobrane.append(parsuj_pojedynczy_mod_online(l))
+                            prog_upd.progress(i / len(nowe_linki))
+                            time.sleep(0.1)
+
+                        calosc = nowo_pobrane + istniejace
+                        with open(JSON_FILE, "w", encoding="utf-8") as f:
+                            json.dump(calosc, f, ensure_ascii=False, indent=2)
+
+                        st.success(
+                            f"🎉 Dodano {len(nowo_pobrane)} nowych modów do bazy!"
+                        )
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+
+        with adm_c2:
+            st.markdown("#### 🖼️ 2. Ekspresowa naprawa zdjęć (10 sekund)")
+            st.caption(
+                "Skanuje 275 stron listy ModHuba i natychmiast przypisuje poprawne miniaturki HTTPS do każdego moda."
+            )
+            if st.button("🔧 Napraw wszystkie zdjęcia online", key="btn_adm_fix_img"):
+                with st.spinner("Pobieranie miniaturek ze stron ModHuba..."):
+                    if os.path.exists(JSON_FILE):
+                        with open(JSON_FILE, "r", encoding="utf-8") as f:
+                            baza_mody = json.load(f)
+
+                        wszystkie_img = {}
+                        with ThreadPoolExecutor(max_workers=25) as ex:
+                            fut = [
+                                ex.submit(pobierz_zdjecia_z_listy_online, p)
+                                for p in range(280)
+                            ]
+                            for f in as_completed(fut):
+                                wszystkie_img.update(f.result())
+
+                        zaktualizowane = 0
+                        for mod in baza_mody:
+                            m_id = str(mod.get("mod_id"))
+                            if m_id in wszystkie_img:
+                                mod["image_url"] = wszystkie_img[m_id]
+                                zaktualizowane += 1
+
+                        with open(JSON_FILE, "w", encoding="utf-8") as f:
+                            json.dump(baza_mody, f, ensure_ascii=False, indent=2)
+
+                        st.success(
+                            f"🎉 Pomyślnie przypisano {zaktualizowane} miniaturek do bazy!"
+                        )
+                        st.cache_data.clear()
+                        time.sleep(1)
+                        st.rerun()
+
+        st.markdown("---")
+        if os.path.exists(JSON_FILE):
+            with open(JSON_FILE, "r", encoding="utf-8") as f:
+                json_str = f.read()
+            st.download_button(
+                "💾 Pobierz aktualny plik `mody_fs25.json` na swój komputer",
+                data=json_str,
+                file_name="mody_fs25.json",
+                mime="application/json",
+            )
+    elif haslo_input:
+        st.error("❌ Nieprawidłowe hasło administratora.")
