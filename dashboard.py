@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 import io
 import json
 import math
@@ -33,6 +33,9 @@ HEADERS = {
 BASE_URL = "https://www.farming-simulator.com/"
 START_URL_PL = "https://www.farming-simulator.com/mods.php?lang=pl&country=pl&title=fs2025&filter=latest&page="
 JSON_FILE = "mody_fs25.json"
+DOMYSLNA_SCIEZKA_MODS = os.path.expanduser(
+    r"~\Documents\My Games\FarmingSimulator2025\mods"
+)
 
 # SŁOWNIK TŁUMACZEŃ KATEGORII
 MAPA_KATEGORII = {
@@ -119,7 +122,7 @@ st.markdown(
         border-radius: 12px;
         padding: 14px;
         margin-bottom: 14px;
-        min-height: 180px;
+        min-height: 185px;
         display: flex;
         flex-direction: column;
         justify-content: space-between;
@@ -170,9 +173,11 @@ st.markdown(
         font-size: 0.76rem;
         font-weight: 600;
         margin-right: 4px;
+        margin-bottom: 3px;
     }
     .badge-size { background-color: #1f6feb; color: #fff; }
     .badge-rating { background-color: #238636; color: #fff; }
+    .badge-patch { background-color: #8957e5; color: #fff; }
     .btn-dl-link {
         display: inline-block;
         background-color: #238636;
@@ -236,6 +241,58 @@ def size_to_mb(size_str):
     return 0.0
 
 
+def parsuj_elastyczna_date(val):
+    if pd.isna(val) or not str(val).strip():
+        return pd.NaT
+    s = str(val).strip()
+
+    m_dot = re.search(r"(\d{1,2})[\./\-](\d{1,2})[\./\-](\d{2,4})", s)
+    if m_dot:
+        d, m, y = int(m_dot.group(1)), int(m_dot.group(2)), int(m_dot.group(3))
+        if y < 100:
+            y += 2000
+        try:
+            return datetime(y, m, d)
+        except Exception:
+            pass
+
+    m_iso = re.search(r"(\d{4})[\./\-](\d{1,2})[\./\-](\d{1,2})", s)
+    if m_iso:
+        y, m, d = int(m_iso.group(1)), int(m_iso.group(2)), int(m_iso.group(3))
+        try:
+            return datetime(y, m, d)
+        except Exception:
+            pass
+
+    try:
+        return pd.to_datetime(s, dayfirst=True, errors="coerce")
+    except Exception:
+        return pd.NaT
+
+
+def oblicz_prawdziwe_aktualizacje(row):
+    wersja_glowna = str(row.get("version", "1.0.0.0")).strip()
+    historia = row.get("version_history", [])
+
+    unikalne_wersje = set()
+    if isinstance(historia, list):
+        for wpis in historia:
+            m = re.search(r"(\d+\.\d+\.\d+\.\d+)", str(wpis))
+            if m:
+                unikalne_wersje.add(m.group(1))
+
+    if len(unikalne_wersje) > 1:
+        return len(unikalne_wersje) - 1
+
+    if wersja_glowna not in ["1.0.0.0", "1.0.0", "1.0", "1.0.0.0.", ""]:
+        m_v = re.search(r"\d+\.(\d+)\.", wersja_glowna)
+        if m_v and int(m_v.group(1)) > 0:
+            return int(m_v.group(1))
+        return 1
+
+    return 0
+
+
 @st.cache_data
 def load_data():
     if not os.path.exists(JSON_FILE):
@@ -253,6 +310,7 @@ def load_data():
         "size_raw": "0 MB",
         "rating": 0.0,
         "votes": 0,
+        "version": "1.0.0.0",
         "download_url": "",
         "filename": "",
         "url": "",
@@ -264,12 +322,25 @@ def load_data():
         else:
             df[col] = df[col].fillna(val)
 
+    if "version_history" not in df.columns:
+        df["version_history"] = [[] for _ in range(len(df))]
+    else:
+        df["version_history"] = df["version_history"].apply(
+            lambda x: x if isinstance(x, list) else []
+        )
+
     df["author"] = df["author"].astype(str).str.strip()
     df["category"] = df["category"].apply(tlumacz_kategorie)
 
     df["size_mb"] = pd.to_numeric(df["size_mb"], errors="coerce").fillna(0.0)
     df["rating"] = pd.to_numeric(df["rating"], errors="coerce").fillna(0.0)
     df["votes"] = pd.to_numeric(df["votes"], errors="coerce").fillna(0)
+
+    # Obliczanie aktualizacji
+    df["updates_count"] = df.apply(oblicz_prawdziwe_aktualizacje, axis=1)
+    df["typ_wydania"] = df["updates_count"].apply(
+        lambda x: "🔄 Aktualizacja" if x > 0 else "🟢 Premiera (v1.0)"
+    )
 
     df["mod_id"] = df["url"].apply(
         lambda x: (
@@ -279,9 +350,7 @@ def load_data():
         )
     )
 
-    df["date"] = pd.to_datetime(
-        df["release_date"], format="%d.%m.%Y", errors="coerce"
-    )
+    df["date"] = df["release_date"].apply(parsuj_elastyczna_date)
     return df.drop_duplicates(subset=["url"])
 
 
@@ -296,9 +365,9 @@ if "selected_page_num" not in st.session_state:
     st.session_state["selected_page_num"] = 1
 
 # NAGŁÓWEK GŁÓWNY
-st.title("🚜 Farming Simulator 25 – ModHub Manager")
+st.title("🚜 Farming Simulator 25 – ModHub Manager & Analytics")
 st.caption(
-    "Centrum analityki, automatyczny menedżer paczek i wizualny eksplorator ModHuba"
+    "Centrum analityki ModHuba, menedżer paczek i pełna historia aktualizacji"
 )
 st.markdown("---")
 
@@ -318,8 +387,10 @@ c3.metric(
     ),
 )
 c4.metric(
-    "🗳️ Oddanych głosów",
-    f"{df['votes'].sum():,}" if not df.empty and "votes" in df else "N/A",
+    "🔄 Zaktualizowanych modów",
+    f"{len(df[df['updates_count'] > 0]):,} ({len(df[df['updates_count'] > 0])/max(1, len(df))*100:.1f}%)"
+    if not df.empty
+    else "N/A",
 )
 c5.metric(
     "👨‍🌾 Liczba autorów", f"{df['author'].nunique():,}" if not df.empty else "0"
@@ -327,10 +398,11 @@ c5.metric(
 
 st.markdown("---")
 
-# 7 GŁÓWNYCH ZAKŁADEK
+# 8 GŁÓWNYCH ZAKŁADEK (W TYM PROFILE TWÓRCÓW)
 (
     tab_modhub,
     tab_koszyk,
+    tab_tworcy,
     tab_statystyki,
     tab_top,
     tab_giants,
@@ -340,6 +412,7 @@ st.markdown("---")
     [
         "🎮 ModHub Visual Hub",
         "🛒 Twoja Paczka & Pobieranie",
+        "👨‍🌾 Profile Twórców (Hall of Fame)",
         "📊 Statystyki & Wykresy",
         "🏆 TOP Rankingi",
         "🕒 Harmonogram GIANTS",
@@ -466,10 +539,18 @@ with tab_modhub:
                 with grid_cols[idx]:
                     mod_id = mod["mod_id"]
                     is_in_basket = mod_id in st.session_state["basket"]
+                    upd_cnt = mod.get("updates_count", 0)
+
                     icon = (
                         mod["category"].split()[0]
                         if " " in mod["category"]
                         else "🚜"
+                    )
+
+                    patch_badge = (
+                        f'<span class="badge-pill badge-patch" title="Liczba aktualizacji">🔄 {upd_cnt} łatki</span>'
+                        if upd_cnt > 0
+                        else ""
                     )
 
                     st.markdown(
@@ -490,6 +571,7 @@ with tab_modhub:
                             <div>
                                 <span class="badge-pill badge-size">💾 {mod['size_raw']}</span>
                                 <span class="badge-pill badge-rating">⭐ {mod['rating']:.1f} ({int(mod['votes'])})</span>
+                                {patch_badge}
                             </div>
                         </div>
                         """,
@@ -518,7 +600,7 @@ with tab_modhub:
                     st.markdown("<br>", unsafe_allow_html=True)
 
 # ==========================================
-# ZAKŁADKA 2: PACZKA & POBIERANIE (BEZPOŚREDNIO PRZEGLĄDARKĄ)
+# ZAKŁADKA 2: PACZKA & POBIERANIE
 # ==========================================
 with tab_koszyk:
     st.subheader("🛒 Twoja Paczka Modów")
@@ -572,7 +654,6 @@ with tab_koszyk:
         st.markdown("---")
         st.markdown("### 🚀 Masowe pobieranie prosto z przeglądarki:")
 
-        # Przygotowanie listy linków
         urls_do_pobrania = []
         for m in basket_list:
             u = m.get("download_url")
@@ -590,7 +671,6 @@ with tab_koszyk:
                 "Przeglądarka po kolei rozpocznie pobieranie każdego modu do folderu Pobrane:"
             )
 
-            # JAVASCRIPT BATCH DOWNLOADER
             js_code = f"""
             <button onclick="pobierzWszystkie()" style="
                 background-color: #238636;
@@ -702,7 +782,215 @@ with tab_koszyk:
             )
 
 # ==========================================
-# ZAKŁADKA 3: STATYSTYKI & WYKRESY
+# ZAKŁADKA 3: PROFILE TWÓRCÓW (HALL OF FAME)
+# ==========================================
+with tab_tworcy:
+    st.subheader("👨‍🌾 Modder Hall of Fame – Profile i Statystyki Twórców")
+    st.write(
+        "Wybierz twórcę, aby poznać jego statystyki, największe hity i specjalizację:"
+    )
+
+    if not df.empty:
+        autorzy_lista = sorted(
+            [a for a in df["author"].unique() if a and a != "Nieznany"]
+        )
+
+        top_5_popular = (
+            df[df["author"] != "Nieznany"]["author"]
+            .value_counts()
+            .head(5)
+            .index.tolist()
+        )
+
+        auth_sel_col1, auth_sel_col2 = st.columns([3, 2])
+
+        with auth_sel_col1:
+            wybrany_autor = st.selectbox(
+                "Wybierz twórcę z listy lub wpisz jego nazwę:",
+                options=autorzy_lista,
+                index=0 if autorzy_lista else None,
+            )
+
+        with auth_sel_col2:
+            st.caption("🔥 Szybki wybór najpopularniejszych twórców:")
+            chip_cols = st.columns(len(top_5_popular))
+            for idx, top_auth_name in enumerate(top_5_popular):
+                if chip_cols[idx].button(
+                    top_auth_name,
+                    key=f"chip_auth_{top_auth_name}",
+                    use_container_width=True,
+                ):
+                    wybrany_autor = top_auth_name
+                    st.rerun()
+
+        if wybrany_autor:
+            df_auth = df[df["author"] == wybrany_autor].copy()
+            mods_count = len(df_auth)
+            total_mb_auth = df_auth["size_mb"].sum()
+            avg_rating_auth = (
+                df_auth[df_auth["rating"] > 0]["rating"].mean()
+                if len(df_auth[df_auth["rating"] > 0]) > 0
+                else 0.0
+            )
+            total_votes_auth = df_auth["votes"].sum()
+            total_patches_auth = df_auth["updates_count"].sum()
+
+            st.markdown("---")
+            st.markdown(f"### 🚜 Profil Twórcy: **{wybrany_autor}**")
+
+            am1, am2, am3, am4, am5 = st.columns(5)
+            am1.metric("📦 Wydanych modów", mods_count)
+            am2.metric(
+                "⭐ Średnia ocena",
+                (
+                    f"{avg_rating_auth:.2f} / 5.0"
+                    if avg_rating_auth > 0
+                    else "Brak ocen"
+                ),
+            )
+            am3.metric("🗳️ Łącznie głosów", f"{total_votes_auth:,}")
+            am4.metric(
+                "💾 Waga wszystkich modów",
+                (
+                    f"{total_mb_auth:.1f} MB"
+                    if total_mb_auth < 1024
+                    else f"{total_mb_auth/1024:.2f} GB"
+                ),
+            )
+            am5.metric("🔄 Wydanych patchy", f"{total_patches_auth}")
+
+            st.markdown("---")
+
+            # HITY TWÓRCY
+            hit_col1, hit_col2 = st.columns([1.5, 1.5])
+
+            with hit_col1:
+                st.markdown("#### 👑 Największe Hity Twórcy")
+
+                # Najwyżej oceniany
+                best_rated = df_auth.sort_values(
+                    by=["rating", "votes"], ascending=[False, False]
+                ).iloc[0]
+                # Najpopularniejszy (głosy)
+                most_voted_auth = df_auth.sort_values(
+                    by="votes", ascending=False
+                ).iloc[0]
+                # Najcięższy projekt
+                heaviest_auth = df_auth.sort_values(
+                    by="size_mb", ascending=False
+                ).iloc[0]
+
+                st.markdown(
+                    f"""
+                    * 🥇 **Najwyżej oceniany mod:** [{best_rated['title']}]({best_rated['url']})  
+                      ⭐ **{best_rated['rating']:.1f}** ({int(best_rated['votes'])} głosów) | 📁 `{best_rated['category']}`
+                    * 🔥 **Najpopularniejszy mod:** [{most_voted_auth['title']}]({most_voted_auth['url']})  
+                      🗳️ **{int(most_voted_auth['votes'])}** ocen społeczności | 💾 `{most_voted_auth['size_raw']}`
+                    * 🐘 **Największy projekt:** [{heaviest_auth['title']}]({heaviest_auth['url']})  
+                      💾 **{heaviest_auth['size_raw']}** | 🔄 {heaviest_auth['updates_count']} patchy
+                    """
+                )
+
+            with hit_col2:
+                st.markdown("#### 🥧 Specjalizacja Twórcy")
+                auth_cat_counts = (
+                    df_auth["category"]
+                    .value_counts()
+                    .reset_index()
+                    .rename(
+                        columns={"index": "Kategoria", "count": "Liczba modów"}
+                    )
+                )
+                fig_spec = px.pie(
+                    auth_cat_counts,
+                    names="category",
+                    values="Liczba modów",
+                    hole=0.4,
+                    title=f"Kategorie projektów ({wybrany_autor})",
+                )
+                st.plotly_chart(fig_spec, use_container_width=True)
+
+            st.markdown("---")
+            st.markdown(f"#### 📋 Wszystkie modyfikacje twórcy ({mods_count}):")
+
+            st.dataframe(
+                df_auth[
+                    [
+                        "title",
+                        "category",
+                        "updates_count",
+                        "size_raw",
+                        "rating",
+                        "votes",
+                        "url",
+                    ]
+                ].sort_values(by=["rating", "votes"], ascending=[False, False]),
+                column_config={
+                    "url": st.column_config.LinkColumn("Otwórz na ModHubie"),
+                    "updates_count": st.column_config.NumberColumn(
+                        "Łatki 🔄", format="%d"
+                    ),
+                    "rating": st.column_config.NumberColumn(
+                        "Ocena ⭐", format="%.1f"
+                    ),
+                },
+                hide_index=True,
+                use_container_width=True,
+            )
+
+        st.markdown("---")
+        st.markdown("### 🏆 Liga Mistrzów Modderów (TOP 15 Najwyżej Ocenianych)")
+        st.caption(
+            "Ranking twórców z najwyższą średnią oceną społeczności (dla modderów z minimum 3 modami):"
+        )
+
+        hall_of_fame = (
+            df[df["author"] != "Nieznany"]
+            .groupby("author")
+            .agg(
+                Liczba_Modow=("title", "count"),
+                Srednia_Ocena=(
+                    "rating",
+                    lambda x: x[x > 0].mean() if len(x[x > 0]) > 0 else 0.0,
+                ),
+                Lacznie_Glosow=("votes", "sum"),
+                Laczna_Waga_MB=("size_mb", "sum"),
+            )
+            .reset_index()
+        )
+
+        hall_of_fame = (
+            hall_of_fame[hall_of_fame["Liczba_Modow"] >= 3]
+            .sort_values(
+                by=["Srednia_Ocena", "Lacznie_Glosow"], ascending=[False, False]
+            )
+            .head(15)
+        )
+
+        hall_of_fame["Waga"] = hall_of_fame["Laczna_Waga_MB"].apply(
+            lambda x: f"{x:.1f} MB" if x < 1024 else f"{x/1024:.2f} GB"
+        )
+
+        st.dataframe(
+            hall_of_fame.drop(columns=["Laczna_Waga_MB"]).rename(
+                columns={
+                    "author": "Twórca / Grupa",
+                    "Liczba_Modow": "Wydanych modów",
+                    "Srednia_Ocena": "Średnia ocena ⭐",
+                    "Lacznie_Glosow": "Oddanych głosów 🗳️",
+                }
+            ),
+            column_config={
+                "Średnia ocena ⭐": st.column_config.NumberColumn(
+                    "Średnia ⭐", format="%.2f / 5.0"
+                )
+            },
+            hide_index=True,
+            use_container_width=True,
+        )
+
+# ==========================================
+# ZAKŁADKA 4: STATYSTYKI & WYKRESY
 # ==========================================
 with tab_statystyki:
     st.subheader("📊 Pełne Statystyki i Analityka ModHuba")
@@ -787,7 +1075,7 @@ with tab_statystyki:
             st.plotly_chart(fig_avg, use_container_width=True)
 
 # ==========================================
-# ZAKŁADKA 4: TOP RANKINGI
+# ZAKŁADKA 5: TOP RANKINGI
 # ==========================================
 with tab_top:
     if not df.empty:
@@ -798,30 +1086,50 @@ with tab_top:
                 df[df["votes"] >= 50]
                 .sort_values(by=["rating", "votes"], ascending=[False, False])
                 .head(20)[
-                    ["title", "author", "rating", "votes", "size_raw", "url"]
+                    [
+                        "title",
+                        "author",
+                        "rating",
+                        "votes",
+                        "updates_count",
+                        "size_raw",
+                        "url",
+                    ]
                 ],
                 column_config={
                     "url": st.column_config.LinkColumn("Link"),
                     "rating": st.column_config.NumberColumn(
                         "Ocena", format="%.2f ⭐"
                     ),
+                    "updates_count": st.column_config.NumberColumn(
+                        "Łatki 🔄", format="%d"
+                    ),
                 },
                 hide_index=True,
                 use_container_width=True,
             )
         with col_t2:
-            st.subheader("🔥 TOP 20 Najpopularniejszych (liczba głosów)")
+            st.subheader("🛠️ TOP 20 Najczęściej Aktualizowanych Modów")
             st.dataframe(
-                df.sort_values(by="votes", ascending=False).head(20)[
-                    ["title", "author", "votes", "rating", "size_raw", "url"]
+                df.sort_values(
+                    by=["updates_count", "rating"], ascending=[False, False]
+                ).head(20)[
+                    [
+                        "title",
+                        "author",
+                        "updates_count",
+                        "rating",
+                        "size_raw",
+                        "url",
+                    ]
                 ],
                 column_config={
                     "url": st.column_config.LinkColumn("Link"),
+                    "updates_count": st.column_config.NumberColumn(
+                        "Liczba patchy 🔄", format="%d"
+                    ),
                     "rating": st.column_config.NumberColumn(
                         "Ocena", format="%.1f ⭐"
-                    ),
-                    "votes": st.column_config.NumberColumn(
-                        "Głosy", format="%d 🗳️"
                     ),
                 },
                 hide_index=True,
@@ -829,10 +1137,16 @@ with tab_top:
             )
 
 # ==========================================
-# ZAKŁADKA 5: DNI TYGODNIA GIANTS
+# ZAKŁADKA 6: HARMONOGRAM GIANTS
 # ==========================================
 with tab_giants:
-    st.subheader("🕒 Kiedy moderatorzy GIANTS publikują mody?")
+    st.subheader(
+        "🕒 Harmonogram Wydań GIANTS – Podział na Premiery i Aktualizacje"
+    )
+    st.caption(
+        "Analiza dokładnych dat premier oraz patchy dzięki zarchiwizowanym danym historycznym."
+    )
+
     if not df.empty:
         df_d = df.dropna(subset=["date"]).copy()
         if not df_d.empty:
@@ -846,46 +1160,181 @@ with tab_giants:
                 "Sunday": "7. Niedziela",
             }
             df_d["Dzień"] = df_d["date"].dt.day_name().map(dni)
+
             g1, g2 = st.columns(2)
+
             with g1:
-                d_cnt = (
-                    df_d["Dzień"]
-                    .value_counts()
-                    .reset_index()
+                d_grouped = (
+                    df_d.groupby(["Dzień", "typ_wydania"])
+                    .size()
+                    .reset_index(name="Liczba wydań")
                     .sort_values(by="Dzień")
                 )
-                d_cnt.columns = ["Dzień tygodnia", "Wydanych modów"]
-                st.plotly_chart(
-                    px.bar(
-                        d_cnt,
-                        x="Dzień tygodnia",
-                        y="Wydanych modów",
-                        color="Wydanych modów",
-                        color_continuous_scale="Teal",
-                    ),
-                    use_container_width=True,
+
+                fig_days = px.bar(
+                    d_grouped,
+                    x="Dzień",
+                    y="Liczba wydań",
+                    color="typ_wydania",
+                    title="Dni tygodnia: Premiery vs Aktualizacje",
+                    color_discrete_map={
+                        "🟢 Premiera (v1.0)": "#238636",
+                        "🔄 Aktualizacja": "#8957e5",
+                    },
+                    barmode="stack",
                 )
+                st.plotly_chart(fig_days, use_container_width=True)
+
             with g2:
-                df_d["Miesiąc"] = df_d["date"].dt.to_period("M").astype(str)
-                m_cnt = (
-                    df_d["Miesiąc"]
-                    .value_counts()
-                    .reset_index()
-                    .sort_values(by="Miesiąc")
+                type_counts = df_d["typ_wydania"].value_counts().reset_index()
+                type_counts.columns = ["Typ", "Liczba"]
+
+                fig_pie_type = px.pie(
+                    type_counts,
+                    names="Typ",
+                    values="Liczba",
+                    title="Stosunek Nowych Modów do Aktualizacji na ModHubie",
+                    hole=0.4,
+                    color="Typ",
+                    color_discrete_map={
+                        "🟢 Premiera (v1.0)": "#238636",
+                        "🔄 Aktualizacja": "#8957e5",
+                    },
                 )
-                m_cnt.columns = ["Miesiąc", "Liczba"]
-                st.plotly_chart(
-                    px.line(m_cnt, x="Miesiąc", y="Liczba", markers=True),
+                st.plotly_chart(fig_pie_type, use_container_width=True)
+
+            df_d["Miesiąc"] = df_d["date"].dt.to_period("M").astype(str)
+            m_grouped = (
+                df_d.groupby(["Miesiąc", "typ_wydania"])
+                .size()
+                .reset_index(name="Liczba wydań")
+                .sort_values(by="Miesiąc")
+            )
+
+            fig_timeline = px.bar(
+                m_grouped,
+                x="Miesiąc",
+                y="Liczba wydań",
+                color="typ_wydania",
+                title="Oś Czasu: Miesięczna liczba premier i patchy",
+                color_discrete_map={
+                    "🟢 Premiera (v1.0)": "#238636",
+                    "🔄 Aktualizacja": "#8957e5",
+                },
+                barmode="group",
+            )
+            st.plotly_chart(fig_timeline, use_container_width=True)
+
+            st.markdown("---")
+
+            # KLASYCZNY ODBLOKOWANY KALENDARZ
+            st.subheader("📅 Kalendarium Dnia – Wybierz datę z kalendarza")
+            st.write(
+                "Wybierz dowolny dzień (z 2024, 2025, 2026 roku itp.), aby sprawdzić ile modów wydało GIANTS w te 24 godziny:"
+            )
+
+            df_d["dzien_czysty"] = df_d["date"].dt.date
+            min_d = df_d["dzien_czysty"].min()
+            max_d = df_d["dzien_czysty"].max()
+
+            cal_c1, cal_c2 = st.columns([1.5, 3.5])
+
+            with cal_c1:
+                wybrana_data = st.date_input(
+                    "📆 Wybierz datę z kalendarza:",
+                    value=max_d if pd.notna(max_d) else date(2026, 8, 24),
+                    min_value=date(2020, 1, 1),
+                    max_value=date(2030, 12, 31),
+                    format="DD.MM.YYYY",
+                )
+
+            df_day = df_d[df_d["dzien_czysty"] == wybrana_data].copy()
+
+            with cal_c2:
+                if not df_day.empty:
+                    nowe_d = len(df_day[df_day["updates_count"] == 0])
+                    latki_d = len(df_day[df_day["updates_count"] > 0])
+                    waga_d = df_day["size_mb"].sum()
+
+                    dc1, dc2, dc3, dc4 = st.columns(4)
+                    dc1.metric("📦 Razem modów", len(df_day))
+                    dc2.metric("🟢 Nowości (v1.0)", nowe_d)
+                    dc3.metric("🔄 Łatki / Update", latki_d)
+                    dc4.metric(
+                        "💾 Waga wydań",
+                        (
+                            f"{waga_d:.1f} MB"
+                            if waga_d < 1024
+                            else f"{waga_d/1024:.2f} GB"
+                        ),
+                    )
+                else:
+                    st.info(
+                        f"W dniu **{wybrana_data.strftime('%d.%m.%Y')}** GIANTS nie opublikowało żadnych modów."
+                    )
+
+            if not df_day.empty:
+                st.markdown(
+                    f"##### 📋 Mody wydane w dniu: `{wybrana_data.strftime('%d.%m.%Y')}` ({len(df_day)} pozycji)"
+                )
+                st.dataframe(
+                    df_day[
+                        [
+                            "title",
+                            "author",
+                            "category",
+                            "typ_wydania",
+                            "updates_count",
+                            "size_raw",
+                            "rating",
+                            "url",
+                        ]
+                    ],
+                    column_config={
+                        "url": st.column_config.LinkColumn("Link"),
+                        "updates_count": st.column_config.NumberColumn(
+                            "Łatki", format="%d"
+                        ),
+                    },
+                    hide_index=True,
                     use_container_width=True,
                 )
 
+            st.markdown("---")
+            st.markdown(
+                "#### 🏆 Rekordowe dni GIANTS (Najwięcej wydań w 1 dzień):"
+            )
+
+            top_days = (
+                df_d.groupby(df_d["date"].dt.strftime("%d.%m.%Y"))
+                .agg(
+                    Razem=("title", "count"),
+                    Nowości=("typ_wydania", lambda x: (x == "🟢 Premiera (v1.0)").sum()),
+                    Łatki=("typ_wydania", lambda x: (x == "🔄 Aktualizacja").sum()),
+                    Łączna_Waga_MB=("size_mb", "sum"),
+                )
+                .reset_index()
+                .rename(columns={"date": "Data"})
+                .sort_values(by="Razem", ascending=False)
+                .head(10)
+            )
+
+            top_days["Waga"] = top_days["Łączna_Waga_MB"].apply(
+                lambda x: f"{x:.1f} MB" if x < 1024 else f"{x/1024:.2f} GB"
+            )
+            st.dataframe(
+                top_days.drop(columns=["Łączna_Waga_MB"]),
+                hide_index=True,
+                use_container_width=True,
+            )
+
 # ==========================================
-# ZAKŁADKA 6: WYSZUKIWARKA & TABELA
+# ZAKŁADKA 7: WYSZUKIWARKA & TABELA
 # ==========================================
 with tab_szukaj:
     st.subheader("🔍 Klasyczna wyszukiwarka i filtry")
     if not df.empty:
-        s_f1, s_f2 = st.columns(2)
+        s_f1, s_f2, s_f3 = st.columns(3)
         with s_f1:
             s_title = st.text_input("Szukaj po nazwie:", key="s_tab_title")
         with s_f2:
@@ -893,6 +1342,15 @@ with tab_szukaj:
                 "Kategorie:",
                 options=sorted(df["category"].unique()),
                 key="s_tab_cat",
+            )
+        with s_f3:
+            s_type = st.selectbox(
+                "Typ wydania:",
+                options=[
+                    "Wszystkie",
+                    "🟢 Tylko premiery (v1.0)",
+                    "🔄 Tylko zaktualizowane",
+                ],
             )
 
         f_res = df.copy()
@@ -902,6 +1360,10 @@ with tab_szukaj:
             ]
         if s_cat:
             f_res = f_res[f_res["category"].isin(s_cat)]
+        if s_type == "🟢 Tylko premiery (v1.0)":
+            f_res = f_res[f_res["updates_count"] == 0]
+        elif s_type == "🔄 Tylko zaktualizowane":
+            f_res = f_res[f_res["updates_count"] > 0]
 
         st.dataframe(
             f_res[
@@ -909,23 +1371,31 @@ with tab_szukaj:
                     "title",
                     "author",
                     "category",
+                    "updates_count",
                     "size_raw",
                     "rating",
                     "votes",
                     "url",
                 ]
             ],
-            column_config={"url": st.column_config.LinkColumn("Link")},
+            column_config={
+                "url": st.column_config.LinkColumn("Link"),
+                "updates_count": st.column_config.NumberColumn(
+                    "Łatki 🔄", format="%d"
+                ),
+            },
             hide_index=True,
             use_container_width=True,
         )
 
 # ==========================================
-# ZAKŁADKA 7: PANEL ADMINISTRATORA
+# ZAKŁADKA 8: PANEL ADMINISTRATORA
 # ==========================================
 with tab_admin:
     st.subheader("⚙️ Panel Zarządzania Bazą ModHub Online")
-    st.write("Z tego miejsca możesz zaktualizować bazę o nowości z poziomu przeglądarki.")
+    st.write(
+        "Z tego miejsca możesz zaktualizować bazę o nowości z poziomu przeglądarki."
+    )
 
     haslo_input = st.text_input(
         "Podaj hasło administratora:", type="password", key="admin_pass_input"
@@ -935,9 +1405,6 @@ with tab_admin:
         st.success("🔓 Zalogowano do panelu administratora!")
 
         st.markdown("#### 🔄 Szybka aktualizacja bazy (Nowości z ModHuba)")
-        st.caption(
-            "Sprawdza najnowsze strony ModHuba i dopisuje tylko brakujące nowe mody."
-        )
         if st.button(
             "🚀 Uruchom aktualizację nowości", type="primary", key="btn_adm_upd"
         ):
@@ -992,7 +1459,6 @@ with tab_admin:
                     nowo_pobrane = []
                     prog_upd = st.progress(0.0)
                     for i, l in enumerate(nowe_linki, start=1):
-                        # Bezpośrednie pobieranie metadanych
                         d = {
                             "url": l,
                             "mod_id": (
@@ -1007,6 +1473,8 @@ with tab_admin:
                             "size_mb": 0.0,
                             "rating": 0.0,
                             "votes": 0,
+                            "updates_count": 0,
+                            "version_history": [],
                             "version": "1.0.0.0",
                             "release_date": "",
                             "download_url": "",
