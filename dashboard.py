@@ -398,7 +398,7 @@ c5.metric(
 
 st.markdown("---")
 
-# 8 GŁÓWNYCH ZAKŁADEK (W TYM PROFILE TWÓRCÓW)
+# 8 GŁÓWNYCH ZAKŁADEK
 (
     tab_modhub,
     tab_koszyk,
