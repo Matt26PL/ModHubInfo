@@ -1,0 +1,39 @@
+name: Automatyczny Bot ModHub & Discord
+
+on:
+  schedule:
+    # Uruchamiaj co 60 minut w godzinach aktywności (7:00 - 22:00 UTC)
+    - cron: '0 * * * *'
+  workflow_dispatch: # Pozwala też odpalić bota ręcznie 1 kliknięciem na GitHubie
+
+permissions:
+  contents: write
+
+jobs:
+  sprawdz-i-powiadom:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Pobranie kodu z repozytorium
+        uses: actions/checkout@v4
+
+      - name: Konfiguracja Pythona
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalacja bibliotek
+        run: |
+          pip install requests beautifulsoup4
+
+      - name: Uruchomienie bota ModHub Discord
+        run: |
+          python bot_discord.py
+
+      - name: Zapisanie zaktualizowanej bazy do repozytorium
+        run: |
+          git config --global user.name "ModHub Bot"
+          git config --global user.email "bot@github.com"
+          git add mody_fs25.json
+          git commit -m "🤖 Automatyczna aktualizacja bazy modów [Bot Discord]" || exit 0
+          git push
