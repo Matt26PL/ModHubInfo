@@ -1,5 +1,22 @@
 [
   {
+    "url": "https://www.farming-simulator.com/mod.php?mod_id=373367&title=fs2025",
+    "mod_id": "373367",
+    "title": "Tolmet Disc Harrows Pack",
+    "author": "JMZ",
+    "category": "Uprawa gleby - Talerzówki",
+    "size_raw": "73.82 MB",
+    "size_mb": 73.82,
+    "rating": 5.0,
+    "votes": 1,
+    "version": "1.0.0.0",
+    "release_date": "18.09.2026",
+    "download_url": "https://cdn27.giants-software.com/modHub/storage/00373367/FS25_Tolmet_DiscHarrows_Pack.zip",
+    "filename": "",
+    "updates_count": 0,
+    "version_history": []
+  },
+  {
     "url": "https://www.farming-simulator.com/mod.php?mod_id=374021&title=fs2025",
     "mod_id": "374021",
     "title": "AI Worker Dynamic Speed",
